@@ -380,11 +380,26 @@ async def weekly_summary(context):
 
 
 # ── API SERVER для Mini App ───────────────────────────────────
+async def handle_options(request):
+    """CORS preflight"""
+    return web.Response(headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+    })
+
+def cors_headers():
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+    }
+
 async def handle_get_user(request):
     """Mini App запрашивает данные пользователя"""
     uid = request.rel_url.query.get("uid")
     if not uid:
-        return web.json_response({"error": "no uid"}, status=400)
+        return web.json_response({"error": "no uid"}, status=400, headers=cors_headers())
     data = load_data()
     user = get_user(data, uid)
     rank = get_rank(user["xp"])
@@ -396,28 +411,28 @@ async def handle_get_user(request):
         "rank":    rank["title"],
         "nextRank": nxt["title"] if nxt else None,
         "lastLog": user.get("last_log"),
-    })
+    }, headers=cors_headers())
 
 async def handle_save_log(request):
     """Mini App отправляет данные после заполнения"""
     try:
         body = await request.json()
     except:
-        return web.json_response({"error": "invalid json"}, status=400)
+        return web.json_response({"error": "invalid json"}, status=400, headers=cors_headers())
 
     uid     = body.get("uid")
     answers = body.get("answers", {})
     weekend = body.get("weekend", False)
 
     if not uid:
-        return web.json_response({"error": "no uid"}, status=400)
+        return web.json_response({"error": "no uid"}, status=400, headers=cors_headers())
 
     data = load_data()
     user = get_user(data, uid)
     today = date.today().isoformat()
 
     if user.get("last_log") == today:
-        return web.json_response({"error": "already logged today"}, status=400)
+        return web.json_response({"error": "already logged today"}, status=400, headers=cors_headers())
 
     # Update streak
     yesterday = (date.today() - timedelta(days=1)).isoformat()
@@ -447,12 +462,14 @@ async def handle_save_log(request):
         "wkBonus": wk_bonus,
         "rankUp":  rank_up,
         "newRank": new_rank["title"] if rank_up else None,
-    })
+    }, headers=cors_headers())
 
 async def start_api_server():
     app_api = web.Application()
     app_api.router.add_get("/user", handle_get_user)
     app_api.router.add_post("/log", handle_save_log)
+    app_api.router.add_route("OPTIONS", "/user", handle_options)
+    app_api.router.add_route("OPTIONS", "/log", handle_options)
     runner = web.AppRunner(app_api)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 8080)))
