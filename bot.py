@@ -8,7 +8,8 @@
 Запуск:     python3 bot.py
 """
 
-import json, os, random, logging, asyncio
+import json, os, random, logging, asyncio, sys
+from aiohttp import web
 from datetime import date, timedelta, datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import (
@@ -16,7 +17,10 @@ from telegram.ext import (
     MessageHandler, filters, ContextTypes, ConversationHandler
 )
 
-BOT_TOKEN = "8005540908:AAFWZx0aBqiG_4rBH0G4597UvxAWpMAQ278"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+if not BOT_TOKEN:
+    print("❌ Нет BOT_TOKEN! Добавь переменную окружения.")
+    sys.exit(1)
 DATA_FILE = "data.json"
 MINI_APP_URL = "https://life-rpg-miniapp.vercel.app"
 
@@ -47,11 +51,11 @@ RANKS = [
 ]
 
 RANK_IMAGES = {
-    "Нулячий пассажир":               "avatar_1.png",
-    "Подающий надежды":               "avatar_2.png",
-    "Нормис":                         "avatar_3.png",
-    "Почти Дуров":                    "avatar_4.png",
-    "Киборг помноженный на вечность": "avatar_5.png",
+    "Нулячий пассажир":               "avatar_1.jpg",
+    "Подающий надежды":               "avatar_2.jpg",
+    "Нормис":                         "avatar_3.jpg",
+    "Почти Дуров":                    "avatar_4.jpg",
+    "Киборг помноженный на вечность": "avatar_5.jpg",
 }
 
 def get_rank(xp):
@@ -374,6 +378,87 @@ async def weekly_summary(context):
             await send_avatar(context, int(uid), rank, text)
         except: pass
 
+
+# ── API SERVER для Mini App ───────────────────────────────────
+async def handle_get_user(request):
+    """Mini App запрашивает данные пользователя"""
+    uid = request.rel_url.query.get("uid")
+    if not uid:
+        return web.json_response({"error": "no uid"}, status=400)
+    data = load_data()
+    user = get_user(data, uid)
+    rank = get_rank(user["xp"])
+    nxt  = get_next_rank(user["xp"])
+    return web.json_response({
+        "xp":      user["xp"],
+        "streak":  user["streak"],
+        "history": user["history"][-10:],
+        "rank":    rank["title"],
+        "nextRank": nxt["title"] if nxt else None,
+        "lastLog": user.get("last_log"),
+    })
+
+async def handle_save_log(request):
+    """Mini App отправляет данные после заполнения"""
+    try:
+        body = await request.json()
+    except:
+        return web.json_response({"error": "invalid json"}, status=400)
+
+    uid     = body.get("uid")
+    answers = body.get("answers", {})
+    weekend = body.get("weekend", False)
+
+    if not uid:
+        return web.json_response({"error": "no uid"}, status=400)
+
+    data = load_data()
+    user = get_user(data, uid)
+    today = date.today().isoformat()
+
+    if user.get("last_log") == today:
+        return web.json_response({"error": "already logged today"}, status=400)
+
+    # Update streak
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    if user.get("last_log") == yesterday: user["streak"] += 1
+    elif user.get("last_log") != today:   user["streak"] = 1
+
+    total, base, mult, alc_pts = calc_day(answers, user["streak"], weekend)
+
+    # Weekly workout bonus
+    wk_count = weekly_workout_count(user["history"])
+    wk_bonus = 50 if (answers.get("workout") and wk_count == 2) else 0
+
+    old_rank = get_rank(user["xp"])
+    user["xp"] = max(0, user["xp"] + total + wk_bonus)
+    user["last_log"] = today
+    answers.update({"xp": total, "date": today})
+    user["history"].append(answers)
+    new_rank = get_rank(user["xp"])
+    save_data(data)
+
+    rank_up = new_rank["title"] != old_rank["title"]
+
+    return web.json_response({
+        "xp":      user["xp"],
+        "streak":  user["streak"],
+        "earned":  total + wk_bonus,
+        "wkBonus": wk_bonus,
+        "rankUp":  rank_up,
+        "newRank": new_rank["title"] if rank_up else None,
+    })
+
+async def start_api_server():
+    app_api = web.Application()
+    app_api.router.add_get("/user", handle_get_user)
+    app_api.router.add_post("/log", handle_save_log)
+    runner = web.AppRunner(app_api)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 8080)))
+    await site.start()
+    print(f"🌐 API сервер запущен на порту {os.environ.get('PORT', 8080)}")
+
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     conv = ConversationHandler(
@@ -397,12 +482,12 @@ def main():
 
     # Запускаем планировщик через asyncio
     async def run():
+        await start_api_server()
         async with app:
             await app.start()
             await app.updater.start_polling()
             asyncio.create_task(scheduler_loop(app))
             print("🤖 Life RPG Bot запущен!")
-            # Держим бота живым
             await asyncio.Event().wait()
 
     asyncio.run(run())
